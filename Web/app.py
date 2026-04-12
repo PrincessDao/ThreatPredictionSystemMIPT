@@ -7,11 +7,52 @@ import matplotlib.pyplot as plt
 import os
 import json
 import random
-from streamlit_autorefresh import st_autorefresh
+import base64
+from io import BytesIO
+import numpy as np
+import soundfile as sf
+import torch
+import silero
 
 st.set_page_config(page_title="Аналитическая платформа", layout="wide")
 st.markdown("### Аналитическая платформа для отслеживания угроз ИБ")
-st_autorefresh(interval=5000, key="refresh")
+
+# ====================== SILERO TTS ======================
+@st.cache_resource
+def load_silero_tts():
+    torch.hub.set_dir("./.cache/torch")
+    model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
+                              model='silero_tts',
+                              language='ru',
+                              speaker='v4_ru')
+    model.to('cpu')
+    return model
+
+tts_model = load_silero_tts()
+
+def generate_tts_audio(text: str, speaker: str = "baya"):
+    """Генерирует речь Silero и возвращает base64 WAV"""
+    try:
+        audio_tensor = tts_model.apply_tts(
+            text=text,
+            speaker=speaker,
+            sample_rate=48000,
+            put_accent=True,
+            put_yo=True
+        )
+        
+        audio_np = audio_tensor.cpu().numpy().astype(np.float32)
+        
+        buffer = BytesIO()
+        sf.write(buffer, audio_np, samplerate=48000, format='WAV')
+        buffer.seek(0)
+        
+        audio_b64 = base64.b64encode(buffer.read()).decode('utf-8')
+        return audio_b64
+    except Exception as e:
+        st.error(f"Ошибка генерации аудио: {e}")
+        return None
+# =======================================================
 
 @st.cache_data
 def load_data():
@@ -45,9 +86,8 @@ def get_latest_attack_info(df):
         
         st.session_state.alert_active_until = now + pd.Timedelta(minutes=5)
         st.session_state.alert_text_cache = text
-        
         return {"attack": True, "text": text}
-        
+    
     return {"attack": False, "text": "Событий не обнаружено"}
 
 incidents, threats = load_data()
@@ -90,8 +130,14 @@ with tab1:
         st.session_state.alert_text_cache = st.session_state.fake_alert_text
         st.session_state.fake_alert_text = None
 
+    # Генерация голосового оповещения
+    audio_b64 = None
+    if attack_info.get("attack"):
+        with st.spinner("Генерация голосового оповещения..."):
+            audio_b64 = generate_tts_audio(attack_info["text"], speaker="kseniya")   # можно поменять на kseniya, baya, aidar
+
     attack_json = json.dumps(attack_info, ensure_ascii=False)
-    
+
     components.html(f"""
     <!DOCTYPE html>
     <html>
@@ -99,10 +145,10 @@ with tab1:
       <meta charset="utf-8">
       <style>
         body {{ margin:0; background: #0b0f1a; color: white; font-family: system-ui, sans-serif; overflow: hidden; }}
-        #waveContainer {{ position: relative; width: 100%; height: 160px; display: flex; align-items: center; justify-content: center; }}
+        #waveContainer {{ position: relative; width: 100%; height: 200px; display: flex; align-items: center; justify-content: center; }}
         canvas {{ width: 100%; height: 100%; display: block; }}
-        #text {{ position: absolute; bottom: 12px; left: 0; right: 0; text-align: center; font-size: 15px; color: #e5e7eb; text-shadow: 0 0 12px rgba(0,0,0,0.9); pointer-events: none; letter-spacing: 0.5px; padding: 0 20px; box-sizing: border-box; transition: color 0.3s, opacity 0.3s; }}
-        #text.active {{ color: #00e5ff; font-weight: 500; }}
+        #text {{ position: absolute; bottom: 15px; left: 0; right: 0; text-align: center; font-size: 16px; color: #e5e7eb; text-shadow: 0 0 15px rgba(0,0,0,0.95); pointer-events: none; }}
+        #text.active {{ color: #00f5ff; font-weight: 600; }}
       </style>
     </head>
     <body>
@@ -110,15 +156,15 @@ with tab1:
         <canvas id="waveCanvas"></canvas>
         <div id="text">Ожидание данных...</div>
       </div>
+      <audio id="alertAudio" autoplay></audio>
+
       <script>
         const canvas = document.getElementById('waveCanvas');
         const ctx = canvas.getContext('2d');
         let width, height, phase = 0;
-        
-        let alertEndTime = 0;
-        let isAlertActive = false;
         let isSpeaking = false;
         const attackData = {attack_json};
+        const audioB64 = "{audio_b64 or ''}";
 
         function resize() {{
           const dpr = window.devicePixelRatio || 1;
@@ -126,95 +172,57 @@ with tab1:
           canvas.width = rect.width * dpr;
           canvas.height = rect.height * dpr;
           ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-          width = rect.width;
-          height = rect.height;
+          width = rect.width; height = rect.height;
         }}
         window.addEventListener('resize', resize);
         resize();
 
         function triggerAlert(text) {{
-          if (!text || text === "Ожидание данных...") return;
-          
           const txtEl = document.getElementById("text");
           txtEl.innerText = text;
           txtEl.classList.add("active");
-
-          alertEndTime = Date.now() + 300000;
-          isAlertActive = true;
           isSpeaking = true;
 
-          const msg = new SpeechSynthesisUtterance(text);
-          msg.lang = 'ru-RU';
-          msg.rate = 1.05;
-          
-          msg.onend = () => {{ 
-            isSpeaking = false;
-          }};
-          msg.onerror = () => {{ 
-            isSpeaking = false; 
-          }};
-          speechSynthesis.speak(msg);
-        }}
-
-        function checkAlertStatus() {{
-            const now = Date.now();
-            if (isAlertActive && now >= alertEndTime) {{
-                isAlertActive = false;
-                isSpeaking = false;
-                const txtEl = document.getElementById("text");
-                txtEl.classList.remove("active");
-                txtEl.innerText = "Ожидание данных...";
-            }}
+          if (audioB64) {{
+            const audio = document.getElementById("alertAudio");
+            audio.src = "data:audio/wav;base64," + audioB64;
+            audio.play().catch(() => {{}});
+          }}
         }}
 
         function draw() {{
-          checkAlertStatus();
-
           ctx.clearRect(0, 0, width, height);
-          const w = width;
-          const h = height;
-          const points = 200;
+          const w = width, h = height, points = 220;
           const step = w / points;
           const centerY = h / 2;
-
-          const baseColor = '#4b5563';
-          const secondaryColor = '#ff2f92';
           
-          const baseAmp = 5;
-          const speakingAmp = 30;
-          
-          let currentAmp = isSpeaking ? speakingAmp : baseAmp;
-          
-          if (isSpeaking) {{
-             currentAmp *= (0.5 + 0.5 * Math.sin(phase * 2.2)); 
-          }}
-          
-          const frequency = isSpeaking ? 0.05 : 0.015;
-          const speed = isSpeaking ? 0.25 : 0.04;
-          const glowSize = isSpeaking ? 25 : 8;
+          const amp = isSpeaking ? 38 : 7;
+          const freq = isSpeaking ? 0.065 : 0.016;
+          const speed = isSpeaking ? 0.32 : 0.045;
+          const glow = isSpeaking ? 32 : 9;
 
           ctx.beginPath();
           for (let i = 0; i <= points; i++) {{
             const x = i * step;
-            const y = centerY + currentAmp * Math.sin(i * frequency + phase);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            const y = centerY + amp * Math.sin(i * freq + phase);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
           }}
-          ctx.strokeStyle = baseColor;
-          ctx.lineWidth = isSpeaking ? 3 : 2;
-          ctx.shadowBlur = glowSize;
-          ctx.shadowColor = baseColor;
+          ctx.strokeStyle = '#4b5563';
+          ctx.lineWidth = isSpeaking ? 4 : 2.5;
+          ctx.shadowBlur = glow;
+          ctx.shadowColor = '#4b5563';
           ctx.stroke();
           ctx.shadowBlur = 0;
 
           ctx.beginPath();
-          ctx.globalAlpha = 0.4;
+          ctx.globalAlpha = 0.5;
           for (let i = 0; i <= points; i++) {{
             const x = i * step;
-            const y = centerY + (currentAmp * 0.7) * Math.sin(i * frequency * 1.4 + phase * 1.3);
-            if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            const y = centerY + (amp * 0.7) * Math.sin(i * freq * 1.4 + phase * 1.4);
+            i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
           }}
-          ctx.strokeStyle = secondaryColor;
-          ctx.lineWidth = 1.5;
+          ctx.strokeStyle = '#ff2f92';
+          ctx.lineWidth = 2;
           ctx.stroke();
           ctx.globalAlpha = 1;
 
@@ -225,41 +233,39 @@ with tab1:
         draw();
 
         if (attackData && attackData.attack) {{
-            triggerAlert(attackData.text);
+          triggerAlert(attackData.text);
         }}
       </script>
     </body>
     </html>
-    """, height=200)
-    
+    """, height=230)
+
     col1, col2, col3, col4 = st.columns(4)
     col1.metric("Всего инцидентов", f"{len(df):,}")
     col2.metric("Угроз из ФСТЭК", len(threats))
     col3.metric("Типов предприятий", df['Тип предприятия'].nunique() if 'Тип предприятия' in df.columns else 0)
     col4.metric("Регионов", df['Регион размещения предприятия'].nunique() if 'Регион размещения предприятия' in df.columns else 0)
-    
-    st.subheader("Распределение инцидентов по типам предприятий")
-    if 'Тип предприятия' in df.columns:
-        type_counts = df['Тип предприятия'].value_counts().head(10).reset_index()
-        type_counts.columns = ['Тип предприятия', 'Количество']
-        fig = px.bar(type_counts, x='Тип предприятия', y='Количество', title="Топ-10 типов предприятий по количеству инцидентов")
-        st.plotly_chart(fig, use_container_width=True)
-        
-    st.subheader("Фейковое оповещение")
+
+    st.subheader("Демонстрация оповещения")
     fake_type = st.text_input("Введите тип угрозы для оповещения", "")
     if st.button("Отправить оповещение", type="primary"):
         if fake_type.strip():
             fake_text = f"Прогнозируется атака! Тип угрозы: {fake_type}, Регион: Симулированный"
             st.session_state.fake_alert_text = fake_text
-            st.session_state.alert_active_until = pd.Timestamp.now() + pd.Timedelta(minutes=5)
-            st.session_state.alert_text_cache = fake_text
             st.rerun()
         else:
             st.warning("Введите тип угрозы")
 
 with tab2:
     st.subheader("Данные об инцидентах")
-    st.dataframe(df.head(30), use_container_width=True)
+    st.dataframe(df.head(30), width="stretch")
+
+    st.subheader("Распределение инцидентов по типам предприятий")
+    if 'Тип предприятия' in df.columns:
+        type_counts = df['Тип предприятия'].value_counts().head(10).reset_index()
+        type_counts.columns = ['Тип предприятия', 'Количество']
+        fig = px.bar(type_counts, x='Тип предприятия', y='Количество', title="Топ-10 типов предприятий по количеству инцидентов")
+        st.plotly_chart(fig, width="stretch")
 
 with tab3:
     st.subheader("Паттерны атак по времени суток, дню недели и сезону")
@@ -275,14 +281,16 @@ with tab3:
             st.pyplot(fig)
         with col_b:
             hourly = df.groupby('hour').size().reset_index(name='count')
-            fig2 = px.bar(hourly, x='hour', y='count', title="Количество инцидентов по часам суток", labels={'hour': 'Час суток', 'count': 'Количество'})
-            st.plotly_chart(fig2, use_container_width=True)
+            fig2 = px.bar(hourly, x='hour', y='count', title="Количество инцидентов по часам суток")
+            st.plotly_chart(fig2, width="stretch")
+        
         seasonal = df.groupby('season').size().reset_index(name='count')
-        fig3 = px.bar(seasonal, x='season', y='count', title="Распределение инцидентов по сезонам", labels={'season': 'Сезон', 'count': 'Количество'})
-        st.plotly_chart(fig3, use_container_width=True)
+        fig3 = px.bar(seasonal, x='season', y='count', title="Распределение инцидентов по сезонам")
+        st.plotly_chart(fig3, width="stretch")
     else:
-        st.warning("Не удалось извлечь временные данные из столбца 'Дата инцидента'.")
+        st.warning("Не удалось извлечь временные данные.")
 
+# ====================== ЖИВАЯ ПАНЕЛЬ ВНИЗУ ======================
 if "live_incidents" not in st.session_state:
     st.session_state.live_incidents = incidents.copy()
 if "live_threats" not in st.session_state:
@@ -291,26 +299,36 @@ if "bottom_active_tab" not in st.session_state:
     st.session_state.bottom_active_tab = -1
 
 def add_random_rows(df, template_df, max_rows=2):
-    if template_df.empty: return df
+    if template_df.empty:
+        return df
+
     n_add = random.randint(0, max_rows)
-    if n_add == 0: return df
-    
+    if n_add == 0:
+        return df
+
     new_rows = []
     cols = template_df.columns
+
     for _ in range(n_add):
         row = {}
+
         for c in cols:
             if c == 'Дата инцидента':
                 row[c] = pd.Timestamp.now()
+
             elif template_df[c].dtype in ['object', 'category', 'string']:
-                vals = template_df[c].dropna().unique()
-                row[c] = random.choice(vals) if len(vals) > 0 else "Неизвестно"
+                vals = template_df[c].dropna().unique().tolist()
+                row[c] = random.choice(vals) if vals else "Неизвестно"
+
             elif pd.api.types.is_numeric_dtype(template_df[c]):
-                vals = template_df[c].dropna()
+                vals = template_df[c].dropna().to_numpy()
                 row[c] = float(random.choice(vals)) if len(vals) > 0 else 0.0
+
             else:
                 row[c] = None
+
         new_rows.append(row)
+
     return pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
 
 if random.random() < 0.45:
@@ -331,7 +349,7 @@ components.html(f"""
 <head>
 <meta charset="utf-8">
 <style>
-  body {{ margin: 0; font-family: system-ui, -apple-system, sans-serif; background: transparent; }}
+  body {{ margin: 0; font-family: system-ui, sans-serif; background: transparent; }}
   .tabs-wrapper {{ display: flex; background: #0b0f1a; border-top: 2px solid #374151; }}
   .tab-btn {{ flex: 1; padding: 14px; background: #111827; color: #9ca3af; border: none; border-top: 2px solid #374151; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }}
   .tab-btn:hover {{ background: #1f2937; color: #e5e7eb; }}
@@ -350,12 +368,12 @@ components.html(f"""
 </head>
 <body>
 <div class="tabs-wrapper">
-  <button class="tab-btn active" id="t0" onclick="setTab(0)">📊 Инциденты (Live)</button>
-  <button class="tab-btn" id="t1" onclick="setTab(1)">⚠️ Угрозы (Live)</button>
+  <button class="tab-btn active" id="t0" onclick="setTab(0)">Инциденты (Live)</button>
+  <button class="tab-btn" id="t1" onclick="setTab(1)">Угрозы (Live)</button>
 </div>
 <div class="slide-panel" id="panel">
   <div class="panel-header">
-    <span id="pTitle">Живая таблица</span>
+    <span id="pTitle">Таблица</span>
     <button class="close-btn" onclick="setTab(-1)">✕</button>
   </div>
   <div class="table-container" id="tCont">
@@ -377,7 +395,7 @@ components.html(f"""
       panel.classList.remove('open');
       return;
     }}
-    document.getElementById('pTitle').innerText = idx === 0 ? 'Живая таблица инцидентов' : 'Живая таблица угроз ФСТЭК';
+    document.getElementById('pTitle').innerText = idx === 0 ? 'Таблица инцидентов' : 'Таблица угроз ФСТЭК';
     render(idx === 0 ? DATA.incidents : DATA.threats);
     panel.classList.add('open');
   }}
