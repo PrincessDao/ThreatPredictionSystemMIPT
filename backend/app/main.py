@@ -1,13 +1,14 @@
-﻿from fastapi import FastAPI
+﻿import logging
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.api import incidents, stats, health
 from app.middleware.logging import log_requests
 from app.db.database import get_sync_client
-import logging
+from app.services.ml_analysis import ml_generator
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 
-app = FastAPI(title="Analytics Backend for InfoSec", version="1.0")
+app = FastAPI(title="Analytics Backend for InfoSec", version="2.0")
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,14 +54,25 @@ async def init_db():
     cnt = client.query("SELECT count() FROM threats").result_rows[0][0]
     if cnt == 0:
         threats_data = [
-            (1, "Утечка данных"), (2, "DDoS-атака"), (3, "Фишинг"),
-            (4, "Вредоносное ПО"), (5, "Социальная инженерия"), (6, "Атака на веб-приложение"),
-            (7, "Скомпрометированные учётные данные"), (8, "Отказ в обслуживании"),
-            (9, "Внутренняя угроза"), (10, "Атака через периферийные устройства"),
-            (11, "Ransomware"), (12, "Man-in-the-Middle"),
+            (1, "Утечка данных"),
+            (2, "DDoS-атака"),
+            (3, "Фишинг"),
+            (4, "Вредоносное ПО"),
+            (5, "Социальная инженерия"),
+            (6, "Атака на веб-приложение"),
+            (7, "Скомпрометированные учётные данные"),
+            (8, "Отказ в обслуживании"),
+            (9, "Внутренняя угроза"),
+            (10, "Атака через периферийные устройства"),
+            (11, "Ransomware"),
+            (12, "Man-in-the-Middle"),
         ]
         client.insert("threats", threats_data, columns=["code", "name"])
     client.close()
+
+@app.on_event("startup")
+async def preload_ml_artifacts():
+    ml_generator.load_artifacts()
 
 @app.on_event("shutdown")
 async def shutdown():
