@@ -172,7 +172,12 @@ async def get_industry_stats(client, industry: str):
         "success_rate_by_month": await get_success_rate_by_month(client, industry=industry),
         "success_rate_by_season": await get_success_rate_by_season(client, industry=industry),
     }
-    return {"total_incidents": total, "success_rate": rate, "top_regions_in_industry": top_regions, "temporal_patterns": temporal}
+    return {
+        "total_incidents": total,
+        "success_rate": rate,
+        "top_regions_in_industry": top_regions,
+        "temporal_patterns": temporal
+    }
 
 async def get_region_stats(client, region: str):
     rows_total = await execute_query(client, "SELECT count() FROM incidents WHERE region = %s", (region,))
@@ -196,4 +201,83 @@ async def get_region_stats(client, region: str):
         "success_rate_by_month": await get_success_rate_by_month(client, region=region),
         "success_rate_by_season": await get_success_rate_by_season(client, region=region),
     }
-    return {"total_incidents": total, "success_rate": rate, "top_industries_in_region": top_industries, "temporal_patterns": temporal}
+    return {
+        "total_incidents": total,
+        "success_rate": rate,
+        "top_industries_in_region": top_industries,
+        "temporal_patterns": temporal
+    }
+
+async def get_hour_max_success_rate(client):
+    rows = await execute_query(client, """
+        SELECT hour, avg(success) as rate
+        FROM incidents
+        GROUP BY hour
+        ORDER BY rate DESC
+        LIMIT 1
+    """)
+    return rows[0] if rows else (None, None)
+
+async def get_day_of_week_max_success_rate(client):
+    rows = await execute_query(client, """
+        SELECT day_of_week, avg(success) as rate
+        FROM incidents
+        GROUP BY day_of_week
+        ORDER BY rate DESC
+        LIMIT 1
+    """)
+    return rows[0] if rows else (None, None)
+
+async def get_month_max_success_rate(client):
+    rows = await execute_query(client, """
+        SELECT month, avg(success) as rate
+        FROM incidents
+        GROUP BY month
+        ORDER BY rate DESC
+        LIMIT 1
+    """)
+    return rows[0] if rows else (None, None)
+
+async def get_top_industries_by_incidents(client, limit=3):
+    rows = await execute_query(client, """
+        SELECT industry, count() as cnt
+        FROM incidents
+        GROUP BY industry
+        ORDER BY cnt DESC
+        LIMIT %s
+    """, (limit,))
+    return [r[0] for r in rows]
+
+async def get_top_regions_by_incidents(client, limit=3):
+    rows = await execute_query(client, """
+        SELECT region, count() as cnt
+        FROM incidents
+        GROUP BY region
+        ORDER BY cnt DESC
+        LIMIT %s
+    """, (limit,))
+    return [r[0] for r in rows]
+
+async def get_top_threats_by_success_rate(client, min_incidents=5, limit=5):
+    rows = await execute_query(client, """
+        SELECT i.threat_code, t.name, avg(success) as rate, count() as cnt
+        FROM incidents i
+        LEFT JOIN threats t ON i.threat_code = t.code
+        GROUP BY i.threat_code, t.name
+        HAVING cnt >= %s
+        ORDER BY rate DESC
+        LIMIT %s
+    """, (min_incidents, limit))
+    return [r[1] or f"Код {r[0]}" for r in rows]
+
+async def get_overall_success_rate(client):
+    rows = await execute_query(client, "SELECT avg(success) FROM incidents")
+    return rows[0][0] if rows else 0.0
+
+async def get_industry_success_rate(client, industry: str):
+    rows = await execute_query(client, "SELECT avg(success) FROM incidents WHERE industry = %s", (industry,))
+    return rows[0][0] if rows else 0.0
+
+async def get_region_success_rate(client, region: str):
+    rows = await execute_query(client, "SELECT avg(success) FROM incidents WHERE region = %s", (region,))
+    return rows[0][0] if rows else 0.0
