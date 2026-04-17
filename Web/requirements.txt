@@ -1,3 +1,7 @@
+streamlit==1.55.0
+requests==2.33.0
+pandas==2.3.3
+
 altair==6.0.0
 attrs==26.1.0
 blinker==1.9.0
@@ -26,7 +30,6 @@ narwhals==2.18.1
 numpy==2.4.3
 openpyxl==3.1.5
 packaging==26.0
-pandas==2.3.3
 patsy==1.0.2
 pillow==12.1.1
 plotly==6.6.0
@@ -38,7 +41,6 @@ pyparsing==3.3.2
 python-dateutil==2.9.0.post0
 pytz==2026.1.post1
 referencing==0.37.0
-requests==2.33.0
 rpds-py==0.30.0
 streamlit-autorefresh==1.0.1
 scipy==1.17.1
@@ -47,7 +49,6 @@ six==1.17.0
 smmap==5.0.3
 stanio==0.5.1
 statsmodels==0.14.6
-streamlit==1.55.0
 tenacity==9.1.4
 toml==0.10.2
 tornado==6.5.5
