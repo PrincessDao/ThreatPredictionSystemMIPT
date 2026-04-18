@@ -126,6 +126,17 @@ print(f"Наиболее опасный день недели (0=пн): {dow_suc
 print(f"Наиболее опасный месяц: {month_success.idxmax()}")
 print(f"Наиболее опасный сезон: {season_success.idxmax()}")
 
+# Тепловая карта количества инцидентов по часу и дню недели
+pivot_heatmap = df.pivot_table(index='день_недели', columns='час', values='Успех', aggfunc='count', fill_value=0)
+plt.figure(figsize=(12,8))
+sns.heatmap(pivot_heatmap, cmap='YlOrRd', annot=True, fmt='d', cbar_kws={'label': 'Количество инцидентов'})
+plt.title('Тепловая карта числа инцидентов по часу и дню недели')
+plt.xlabel('Час')
+plt.ylabel('День недели (0=пн)')
+plt.tight_layout()
+plt.savefig('fig_heatmap_hour_dow.png')
+plt.close()
+
 # ------------------------------------------------------------
 # 3. Кластерный анализ инцидентов
 # ------------------------------------------------------------
@@ -155,12 +166,7 @@ K_range = range(2, 11)
 for k in K_range:
     kmeans = KMeans(n_clusters=k, random_state=42, n_init=10)
     kmeans.fit(X_cluster_scaled)
-    iner = kmeans.inertia_
-    iner = float(iner)  # Ensure Python float
-    iner = iner if iner is not None else 0.0
-    iner = float(iner)
-    iner = iner if iner is not None else 0.0
-    inertias.append(iner)
+    inertias.append(kmeans.inertia_)
     labels = kmeans.labels_
     sil = silhouette_score(X_cluster_scaled, labels)
     silhouettes.append(sil)
@@ -229,8 +235,17 @@ X_base[num_cols] = scaler.fit_transform(X_base[num_cols])
 X_ext[num_cols] = X_base[num_cols]  # уже масштабированы
 # cluster уже в диапазоне [0..k-1], не масштабируем
 
+# Тепловая карта корреляции всех признаков (включая кластер)
+corr_matrix = X_ext.corr()
+plt.figure(figsize=(12,10))
+sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt='.2f', linewidths=0.5)
+plt.title('Тепловая карта корреляции признаков (включая кластер)')
+plt.tight_layout()
+plt.savefig('fig_corr_heatmap.png')
+plt.close()
+
 # ------------------------------------------------------------
-# 5. Моделирование успешности атаки: baseline vs улучшенная
+# 5. Моделирование успешности атаки: baseline vs улучшенная (с кластером)
 # ------------------------------------------------------------
 # Разделение данных (стратификация по успеху)
 X_train_b, X_test_b, y_train_b, y_test_b = train_test_split(
@@ -265,6 +280,19 @@ print("Улучшение на {:.4f}".format(acc_e - acc_b))
 
 print("\nClassification report (improved model):")
 print(classification_report(y_test_b, y_pred_e))
+
+# Тепловая карта матрицы ошибок улучшенной модели
+cm = confusion_matrix(y_test_b, y_pred_e)
+plt.figure(figsize=(6,5))
+sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', 
+            xticklabels=['Неуспешно', 'Успешно'], 
+            yticklabels=['Неуспешно', 'Успешно'])
+plt.title('Матрица ошибок улучшенной модели')
+plt.xlabel('Предсказанный класс')
+plt.ylabel('Истинный класс')
+plt.tight_layout()
+plt.savefig('fig_confusion_matrix_heatmap.png')
+plt.close()
 
 # Важность признаков улучшенной модели
 plt.figure(figsize=(10,6))
@@ -330,7 +358,91 @@ print(classification_report(y_test_tb, model_threat_e.predict(X_test_te),
                             target_names=le_threat.classes_.astype(str)))
 
 # ------------------------------------------------------------
-# 7. Анализ уязвимостей и рекомендации
+# 7. Симуляция поступления новых данных и улучшения модели
+# ------------------------------------------------------------
+print("\n=== Симуляция обновления модели с новыми данными ===")
+
+# Сортируем данные по дате инцидента (имитация временного ряда)
+df_sorted = df.sort_values('Дата_инцидента').reset_index(drop=True)
+
+# Определяем точку разделения: первые 80% - исторические, последние 20% - "новые"
+split_idx = int(0.8 * len(df_sorted))
+df_historical = df_sorted.iloc[:split_idx].copy()
+df_new = df_sorted.iloc[split_idx:].copy()
+
+print(f"Исторических данных: {len(df_historical)} записей")
+print(f"Новых данных (для обновления): {len(df_new)} записей")
+
+# Подготавливаем признаки для исторических и новых данных
+X_hist = X_ext.iloc[:split_idx]
+y_hist = y_success[:split_idx]
+X_new = X_ext.iloc[split_idx:]
+y_new = y_success[split_idx:]
+
+# Проверяем баланс классов в новых данных
+print(f"Доля успешных атак в исторических данных: {y_hist.mean():.2f}")
+print(f"Доля успешных атак в новых данных: {y_new.mean():.2f}")
+
+# 1. Обучаем модель на исторических данных
+model_initial = xgb.XGBClassifier(
+    n_estimators=100, max_depth=5, learning_rate=0.1,
+    random_state=42, use_label_encoder=False, eval_metric='logloss'
+)
+model_initial.fit(X_hist, y_hist)
+
+# Оцениваем на новых данных (без дообучения)
+y_pred_new_initial = model_initial.predict(X_new)
+acc_initial_on_new = accuracy_score(y_new, y_pred_new_initial)
+print(f"\nТочность исходной модели на новых данных: {acc_initial_on_new:.4f}")
+
+# 2. Дообучаем модель на новых данных
+model_updated = xgb.XGBClassifier(
+    n_estimators=20,  # добавляем 20 деревьев
+    max_depth=5, learning_rate=0.1,
+    random_state=42, use_label_encoder=False, eval_metric='logloss'
+)
+model_updated.fit(X_new, y_new, xgb_model=model_initial.get_booster())
+
+# Оцениваем обновлённую модель на новых данных
+y_pred_new_updated = model_updated.predict(X_new)
+acc_updated_on_new = accuracy_score(y_new, y_pred_new_updated)
+print(f"Точность обновлённой модели на новых данных: {acc_updated_on_new:.4f}")
+print(f"Улучшение после дообучения: {acc_updated_on_new - acc_initial_on_new:.4f}")
+
+# Полное переобучение на объединённых данных
+X_combined = pd.concat([X_hist, X_new])
+y_combined = np.concatenate([y_hist, y_new])
+model_retrained = xgb.XGBClassifier(
+    n_estimators=100, max_depth=5, learning_rate=0.1,
+    random_state=42, use_label_encoder=False, eval_metric='logloss'
+)
+model_retrained.fit(X_combined, y_combined)
+
+y_pred_retrained = model_retrained.predict(X_combined)
+acc_retrained_full = accuracy_score(y_combined, y_pred_retrained)
+print(f"\nТочность полностью переобученной модели (на всех данных, включая новые): {acc_retrained_full:.4f}")
+
+# Визуализация сравнения точности
+methods = ['Исходная\n(на новых)', 'После дообучения\n(на новых)', 'Полное переобучение\n(на всех)']
+accuracies = [acc_initial_on_new, acc_updated_on_new, acc_retrained_full]
+
+plt.figure(figsize=(8,6))
+bars = plt.bar(methods, accuracies, color=['#1f77b4', '#ff7f0e', '#2ca02c'])
+plt.ylim(0, 1)
+plt.ylabel('Accuracy')
+plt.title('Улучшение модели при добавлении новых данных')
+for bar, acc in zip(bars, accuracies):
+    plt.text(bar.get_x() + bar.get_width()/2, bar.get_height() + 0.02, f'{acc:.3f}', ha='center')
+plt.tight_layout()
+plt.savefig('fig_model_update.png')
+plt.close()
+
+# Сохраняем обновлённую модель как основную
+joblib.dump(model_updated, 'model_success_updated.pkl')
+print("Обновлённая модель сохранена как 'model_success_updated.pkl'")
+
+# ------------------------------------------------------------
+# 8. Анализ уязвимостей и рекомендации
 # ------------------------------------------------------------
 print("\n=== Анализ уязвимых мест ===")
 
@@ -353,7 +465,7 @@ print("\nРиск по кластерам (доля успешных атак):"
 print(cluster_risk)
 
 # ------------------------------------------------------------
-# 8. Генерация рекомендаций
+# 9. Генерация рекомендаций
 # ------------------------------------------------------------
 print("\n=== Рекомендации по усилению защиты ===")
 
@@ -369,10 +481,10 @@ importances = pd.Series(model_improved.feature_importances_, index=feature_cols_
 print(f"\n6. Ключевые факторы успешной атаки (важность): {importances.head(3).to_dict()}")
 print("   Рекомендуется усилить контроль по этим направлениям (например, для отрасли – провести аудит, для региона – установить дополнительные средства защиты).")
 
-print("\n7. Архитектура безопасности: внедрить систему раннего предупреждения на основе улучшенной модели. Использовать SHAP-анализ для динамической корректировки политик безопасности.")
+print("\n7. Архитектура безопасности: внедрить систему раннего предупреждения на основе улучшенной модели с механизмом регулярного обновления по мере поступления новых инцидентов.")
 
 # ------------------------------------------------------------
-# 9. Сохранение отчета и артефактов
+# 10. Сохранение отчета и артефактов
 # ------------------------------------------------------------
 with open('report.txt', 'w', encoding='utf-8') as f:
     f.write("=== Отчет по анализу угроз информационной безопасности ===\n\n")
@@ -383,6 +495,10 @@ with open('report.txt', 'w', encoding='utf-8') as f:
     f.write(f"Baseline accuracy: {acc_b:.4f}\n")
     f.write(f"Improved accuracy (с кластерами): {acc_e:.4f}\n")
     f.write(f"Улучшение: {acc_e - acc_b:.4f}\n\n")
+    f.write("=== Обновление модели на новых данных ===\n")
+    f.write(f"Точность исходной модели на новых данных: {acc_initial_on_new:.4f}\n")
+    f.write(f"Точность после дообучения на новых данных: {acc_updated_on_new:.4f}\n")
+    f.write(f"Улучшение после обновления: {acc_updated_on_new - acc_initial_on_new:.4f}\n\n")
     f.write("=== Рекомендации ===\n")
     f.write(f"1. Временная защита: усилить мониторинг в {hour_success.idxmax()}:00, по {dow_success.idxmax()}-му дню недели и в {month_success.idxmax()}-м месяце.\n")
     f.write(f"2. Отраслевая защита: особое внимание уделить отраслям {industry_success.head(3).index.tolist()}.\n")
@@ -390,7 +506,7 @@ with open('report.txt', 'w', encoding='utf-8') as f:
     f.write(f"4. По угрозам: сконцентрироваться на предотвращении следующих типов атак: {threat_success_filtered.head(5).index.tolist()}.\n")
     f.write(f"5. Кластеры высокого риска: {cluster_risk.head(2).index.tolist()}\n")
     f.write(f"6. Ключевые факторы успешной атаки: {importances.head(3).to_dict()}\n")
-    f.write("7. Архитектура безопасности: внедрить систему раннего предупреждения на основе улучшенной модели.\n")
+    f.write("7. Архитектура безопасности: внедрить систему раннего предупреждения на основе улучшенной модели с возможностью дообучения.\n")
 
 # Сохранение моделей и предобработчиков для веб-приложения
 joblib.dump(model_improved, 'model_success_improved.pkl')
