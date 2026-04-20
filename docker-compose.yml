@@ -1,58 +1,106 @@
 version: "3.9"
 
 services:
-
   postgres:
     image: postgres:15
     container_name: postgres_db
     environment:
-      POSTGRES_DB: threatdb
-      POSTGRES_USER: admin
-      POSTGRES_PASSWORD: admin
+      DB_HOST: postgres
+      DB_NAME: threatdb
+      DB_USER: admin
+      DB_PASSWORD: admin
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U admin -d threatdb"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
 
   zookeeper:
     image: confluentinc/cp-zookeeper:7.5.0
+    container_name: zookeeper
     environment:
       ZOOKEEPER_CLIENT_PORT: 2181
+      ZOOKEEPER_TICK_TIME: 2000
     ports:
       - "2181:2181"
+    healthcheck:
+      test: ["CMD", "nc", "-z", "localhost", "2181"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   kafka:
     image: confluentinc/cp-kafka:7.5.0
+    container_name: kafka
     depends_on:
-      - zookeeper
+      zookeeper:
+        condition: service_healthy
     ports:
       - "9092:9092"
+      - "29092:29092"
     environment:
       KAFKA_BROKER_ID: 1
       KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
-      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://kafka:9092
+      KAFKA_LISTENERS: PLAINTEXT://0.0.0.0:9092,INTERNAL://0.0.0.0:29092
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092,INTERNAL://kafka:29092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT:PLAINTEXT,INTERNAL:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: INTERNAL
       KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+    healthcheck:
+      test: ["CMD", "kafka-broker-api-versions", "--bootstrap-server", "localhost:9092"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
 
   backend:
     build: ./backend
     container_name: backend
     depends_on:
-      - postgres
-      - kafka
+      postgres:
+        condition: service_healthy
+      kafka:
+        condition: service_healthy
     ports:
       - "8000:8000"
-    command: bash -c "
-      python manage.py makemigrations &&
-      python manage.py migrate &&
-      python manage.py runserver 0.0.0.0:8000
-    "
+    volumes:
+      - ./backend:/app
+      - ./data:/data
+    environment:
+      DATABASE_URL: postgresql://admin:admin@postgres:5432/threatdb
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+    command: >
+      bash -c "
+        echo 'Running migrations...' &&
+        python manage.py makemigrations security_app &&
+        python manage.py migrate &&
+        echo 'Loading data...' &&
+        python manage.py load_data --threats ../data/thrlist.xlsx --incidents ../data/incidents_2000.xlsx &&
+        echo 'Starting Django server...' &&
+        python manage.py runserver 0.0.0.0:8000
+      "
 
   analysis:
     build: ./analysis
     container_name: analysis
     depends_on:
-      - kafka
-    command: python producer.py
+      kafka:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    volumes:
+      - ./backend:/backend
+      - ./analysis:/app
+      - ./artifacts:/artifacts
+      - ./data:/data
+    environment:
+      KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DATABASE_URL: postgresql://admin:admin@postgres:5432/threatdb
+    command: python src/main.py
 
   streamlit:
     build: ./web
@@ -61,6 +109,11 @@ services:
       - "8501:8501"
     depends_on:
       - backend
+    volumes:
+      - ./web:/app
+    environment:
+      BACKEND_URL: http://backend:8000
+    command: streamlit run app.py --server.address 0.0.0.0
 
 volumes:
   pgdata:
