@@ -1,38 +1,57 @@
+# app.py
 import streamlit as st
 import streamlit.components.v1 as components
 import pandas as pd
+import numpy as np
 import plotly.express as px
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
 import seaborn as sns
 import matplotlib.pyplot as plt
 import os
+import sys
 import json
 import random
 import base64
 from io import BytesIO
-import numpy as np
-import soundfile as sf
-import torch
-import silero
+from datetime import datetime, timedelta
+import warnings
+warnings.filterwarnings('ignore')
 
-st.set_page_config(page_title="Аналитическая платформа", layout="wide")
-st.markdown("### Аналитическая платформа для отслеживания угроз ИБ")
+sys.path.append('../backend')
+os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 
-# ====================== SILERO TTS ======================
+import django
+django.setup()
+
+from security_app.models import Incident, Threat
+
 @st.cache_resource
 def load_silero_tts():
-    torch.hub.set_dir("./.cache/torch")
-    model, _ = torch.hub.load(repo_or_dir='snakers4/silero-models',
-                              model='silero_tts',
-                              language='ru',
-                              speaker='v4_ru')
-    model.to('cpu')
-    return model
+    try:
+        import torch
+        import soundfile as sf
+        torch.hub.set_dir("./.cache/torch")
+        model, _ = torch.hub.load(
+            repo_or_dir='snakers4/silero-models',
+            model='silero_tts',
+            language='ru',
+            speaker='v4_ru'
+        )
+        model.to('cpu')
+        return model
+    except Exception as e:
+        st.warning(f"Silero TTS не загружен: {e}")
+        return None
 
 tts_model = load_silero_tts()
 
-def generate_tts_audio(text: str, speaker: str = "baya"):
-    """Генерирует речь Silero и возвращает base64 WAV"""
+def generate_tts_audio(text: str, speaker: str = "kseniya"):
+    if tts_model is None:
+        return None
     try:
+        import torch
+        import soundfile as sf
         audio_tensor = tts_model.apply_tts(
             text=text,
             speaker=speaker,
@@ -40,32 +59,76 @@ def generate_tts_audio(text: str, speaker: str = "baya"):
             put_accent=True,
             put_yo=True
         )
-        
         audio_np = audio_tensor.cpu().numpy().astype(np.float32)
-        
         buffer = BytesIO()
         sf.write(buffer, audio_np, samplerate=48000, format='WAV')
         buffer.seek(0)
-        
         audio_b64 = base64.b64encode(buffer.read()).decode('utf-8')
         return audio_b64
     except Exception as e:
         st.error(f"Ошибка генерации аудио: {e}")
         return None
-# =======================================================
 
-@st.cache_data
-def load_data():
-    incidents = pd.read_excel("incidents_2000.xlsx", header=0)
-
-    if os.path.exists("thrlist.xlsx"):
-        threats = pd.read_excel("thrlist.xlsx", header=1)
-    elif os.path.exists("Файл с сайта ФСТЭК.xlsx"):
-        threats = pd.read_excel("Файл с сайта ФСТЭК.xlsx", header=1)
-    else:
-        threats = pd.DataFrame()
-
-    return incidents, threats
+@st.cache_data(ttl=300)
+def load_incidents_from_db():
+    try:
+        qs = Incident.objects.all().values(
+            'enterprise_type',
+            'enterprise_code',
+            'host_count',
+            'threat_code',
+            'success',
+            'region',
+            'incident_date',
+            'incident_time'
+        )
+        df = pd.DataFrame(list(qs))
+        
+        if df.empty:
+            return pd.DataFrame()
+        
+        df = df.rename(columns={
+            'enterprise_type': 'Тип_предприятия',
+            'enterprise_code': 'Код_предприятия',
+            'host_count': 'Количество_хостов',
+            'threat_code': 'Код_реализованной_угрозы',
+            'success': 'Успех',
+            'region': 'Регион_размещения_предприятия',
+            'incident_date': 'Дата_инцидента',
+            'incident_time': 'Региональное_время'
+        })
+        
+        df['Тип_предприятия'] = df['Тип_предприятия'].astype(str)
+        df['Регион_размещения_предприятия'] = df['Регион_размещения_предприятия'].astype(str)
+        df['Код_предприятия'] = pd.to_numeric(df['Код_предприятия'], errors='coerce').fillna(0).astype(int)
+        df['Количество_хостов'] = pd.to_numeric(df['Количество_хостов'], errors='coerce').fillna(0).astype(int)
+        df['Код_реализованной_угрозы'] = pd.to_numeric(df['Код_реализованной_угрозы'], errors='coerce').fillna(0).astype(int)
+        df['Успех'] = pd.to_numeric(df['Успех'], errors='coerce').fillna(0).astype(int)
+        
+        df['Региональное_время'] = pd.to_datetime(df['Региональное_время'], errors='coerce')
+        if df['Региональное_время'].dt.tz is not None:
+            df['Региональное_время'] = df['Региональное_время'].dt.tz_localize(None)
+        
+        df['Дата_инцидента'] = pd.to_datetime(df['Дата_инцидента'], errors='coerce')
+        if df['Дата_инцидента'].dt.tz is not None:
+            df['Дата_инцидента'] = df['Дата_инцидента'].dt.tz_localize(None)
+        
+        df['час'] = df['Региональное_время'].dt.hour
+        df['день_недели'] = df['Региональное_время'].dt.dayofweek
+        df['месяц'] = df['Региональное_время'].dt.month
+        
+        def get_season(m):
+            if m in [12, 1, 2]: return 'Зима'
+            elif m in [3, 4, 5]: return 'Весна'
+            elif m in [6, 7, 8]: return 'Лето'
+            return 'Осень'
+        
+        df['сезон'] = df['месяц'].apply(get_season)
+        
+        return df
+    except Exception as e:
+        st.error(f"Ошибка загрузки инцидентов: {e}")
+        return pd.DataFrame()
 
 def get_latest_attack_info(df):
     now = pd.Timestamp.now()
@@ -77,14 +140,17 @@ def get_latest_attack_info(df):
             st.session_state.alert_active_until = None
             st.session_state.alert_text_cache = None
 
-    if 'Дата инцидента' not in df.columns or len(df) == 0:
+    if df.empty or 'Региональное_время' not in df.columns:
         return {"attack": False, "text": "Нет данных"}
     
-    last_5_sec = df[df['Дата инцидента'] > now - pd.Timedelta(seconds=5)]
+    # Убираем временную зону у 'now' для корректного сравнения
+    now_naive = now.tz_localize(None) if now.tzinfo is not None else now
+    
+    last_5_sec = df[df['Региональное_время'] > now_naive - pd.Timedelta(seconds=5)]
     
     if len(last_5_sec) > 0:
         last = last_5_sec.iloc[-1]
-        text = f"Прогнозируется атака! Тип угрозы: {last.get('Тип предприятия', 'Неизвестно')}, Регион: {last.get('Регион размещения предприятия', 'Неизвестно')}"
+        text = f"Прогнозируется атака! Тип: {last.get('Тип_предприятия', 'Неизвестно')}, Регион: {last.get('Регион_размещения_предприятия', 'Неизвестно')}"
         
         st.session_state.alert_active_until = now + pd.Timedelta(minutes=5)
         st.session_state.alert_text_cache = text
@@ -92,128 +158,218 @@ def get_latest_attack_info(df):
     
     return {"attack": False, "text": "Событий не обнаружено"}
 
-def add_time_features(df):
-    df = df.copy()
+@st.cache_data(ttl=300)
+def load_threats_from_db():
+    try:
+        qs = Threat.objects.all().values('threat_id', 'name')
+        df = pd.DataFrame(list(qs))
+        if df.empty:
+            return pd.DataFrame(columns=['Код_угрозы', 'Название_угрозы'])
+        
+        df = df.rename(columns={
+            'threat_id': 'Код_угрозы',
+            'name': 'Название_угрозы'
+        })
+        return df
+    except Exception as e:
+        st.error(f"Ошибка загрузки угроз: {e}")
+        return pd.DataFrame(columns=['Код_угрозы', 'Название_угрозы'])
+def get_latest_attack_info(df):
+    now = pd.Timestamp.now()
+    
+    if "alert_active_until" in st.session_state and "alert_text_cache" in st.session_state:
+        if st.session_state.alert_active_until and now < st.session_state.alert_active_until:
+            return {"attack": True, "text": st.session_state.alert_text_cache}
+        else:
+            st.session_state.alert_active_until = None
+            st.session_state.alert_text_cache = None
 
-    df['Региональное время'] = pd.to_datetime(
-        df['Региональное время'],
-        errors='coerce',
-        dayfirst=True
-    )
+    if df.empty or 'Региональное_время' not in df.columns:
+        return {"attack": False, "text": "Нет данных"}
+    
+    last_5_sec = df[df['Региональное_время'] > now - pd.Timedelta(seconds=5)]
+    
+    if len(last_5_sec) > 0:
+        last = last_5_sec.iloc[-1]
+        text = f"Прогнозируется атака! Тип: {last.get('Тип_предприятия', 'Неизвестно')}, Регион: {last.get('Регион_размещения_предприятия', 'Неизвестно')}"
+        
+        st.session_state.alert_active_until = now + pd.Timedelta(minutes=5)
+        st.session_state.alert_text_cache = text
+        return {"attack": True, "text": text}
+    
+    return {"attack": False, "text": "Событий не обнаружено"}
 
-    dt = df['Региональное время']
-
-    df['hour'] = dt.dt.hour
-    df['day_of_week'] = dt.dt.day_name().map(day_map)
-    df['month_num'] = dt.dt.month
-    df['month'] = df['month_num'].map(month_map)
-    df['season'] = df['month_num'].apply(get_season)
-
-    df.drop(columns=['month_num'], inplace=True)
-
-    return df
-
-incidents, threats = load_data()
-
-if 'Дата инцидента' in incidents.columns:
-    incidents['Дата инцидента'] = pd.to_datetime(
-        incidents['Дата инцидента'],
-        errors='coerce'
-    )
-
-    incidents = incidents.dropna(subset=['Дата инцидента']).copy()
-
-# --- ВРЕМЯ БЕРЁМ ИЗ "Региональное время" ---
-if 'Региональное время' in incidents.columns:
-    incidents['Региональное время'] = pd.to_datetime(
-        incidents['Региональное время'],
-        errors='coerce',
-        dayfirst=True
-    )
-
-    dt_time = incidents['Региональное время']
-
-    incidents['hour'] = dt_time.dt.hour
-    day_map = {
-    'Monday': 'Понедельник',
-    'Tuesday': 'Вторник',
-    'Wednesday': 'Среда',
-    'Thursday': 'Четверг',
-    'Friday': 'Пятница',
-    'Saturday': 'Суббота',
-    'Sunday': 'Воскресенье'
-    }
-
-    incidents['day_of_week'] = dt_time.dt.day_name().map(day_map)
-    incidents['month_num'] = dt_time.dt.month
-
-    month_map = {
-        1: 'Январь', 2: 'Февраль', 3: 'Март', 4: 'Апрель',
-        5: 'Май', 6: 'Июнь', 7: 'Июль', 8: 'Август',
-        9: 'Сентябрь', 10: 'Октябрь', 11: 'Ноябрь', 12: 'Декабрь'
-    }
-
-    incidents['month'] = incidents['month_num'].map(month_map)
-
-    def get_season(m):
-        if m in (12, 1, 2):
-            return 'Зима'
-        elif m in (3, 4, 5):
-            return 'Весна'
-        elif m in (6, 7, 8):
-            return 'Лето'
-        elif m in (9, 10, 11):
-            return 'Осень'
+def safe_get(series, default=0):
+    return series.iloc[0] if len(series) > 0 else default
+def plot_industry_distribution(df):
+    if 'Тип_предприятия' not in df.columns or df.empty:
         return None
+    top = df['Тип_предприятия'].value_counts().head(10).reset_index()
+    top.columns = ['Отрасль', 'Количество']
+    fig = px.bar(top, x='Количество', y='Отрасль', orientation='h',
+                 title='Топ-10 отраслей по числу инцидентов',
+                 color='Количество', color_continuous_scale='Blues')
+    fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
+    return fig
 
-    incidents['season'] = incidents['month_num'].apply(get_season)
+def plot_region_distribution(df):
+    if 'Регион_размещения_предприятия' not in df.columns or df.empty:
+        return None
+    top = df['Регион_размещения_предприятия'].value_counts().head(10).reset_index()
+    top.columns = ['Регион', 'Количество']
+    fig = px.bar(top, x='Количество', y='Регион', orientation='h',
+                 title='Топ-10 регионов по числу инцидентов',
+                 color='Количество', color_continuous_scale='Greens')
+    fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
+    return fig
 
-    incidents.drop(columns=['month_num'], inplace=True)
+def plot_success_rate_by_industry(df):
+    if 'Тип_предприятия' not in df.columns or 'Успех' not in df.columns or df.empty:
+        return None
+    stats = df.groupby('Тип_предприятия')['Успех'].agg(['mean', 'count']).reset_index()
+    stats = stats[stats['count'] >= 5]
+    stats.columns = ['Отрасль', 'Успешность', 'Количество']
+    stats['Успешность'] = stats['Успешность'] * 100
+    
+    fig = px.bar(stats, x='Отрасль', y='Успешность',
+                 title='Доля успешных атак по отраслям (%)',
+                 color='Успешность', color_continuous_scale='RdYlGn_r')
+    fig.update_layout(xaxis_tickangle=-45, height=400)
+    fig.update_yaxes(range=[0, 100], title='Успешность, %')
+    return fig
 
-    rename_map = {
-    "hour": "Час",
-    "day_of_week": "День недели",
-    "month": "Месяц",
-    "season": "Сезон"
-    }
+def plot_threat_distribution(df, threats_df):
+    if 'Код_реализованной_угрозы' not in df.columns or df.empty:
+        return None
+    
+    df_merged = df.merge(
+        threats_df[['Код_угрозы', 'Название_угрозы']],
+        left_on='Код_реализованной_угрозы',
+        right_on='Код_угрозы',
+        how='left'
+    )
+    
+    top = df_merged['Название_угрозы'].value_counts().head(10).reset_index()
+    top.columns = ['Угроза', 'Количество']
+    top['Угроза'] = top['Угроза'].fillna('Неизвестно')
+    
+    fig = px.bar(top, x='Количество', y='Угроза', orientation='h',
+                 title='Топ-10 типов угроз',
+                 color='Количество', color_continuous_scale='OrRd')
+    fig.update_layout(yaxis={'categoryorder': 'total ascending'}, height=400)
+    return fig
 
-    incidents.rename(columns=rename_map, inplace=True)
+def plot_attacks_by_hour(df):
+    if 'час' not in df.columns or df.empty:
+        return None
+    hourly = df.groupby('час').size().reset_index(name='count')
+    fig = px.line(hourly, x='час', y='count', markers=True,
+                  title='Динамика атак по часам суток',
+                  labels={'час': 'Час', 'count': 'Количество инцидентов'})
+    fig.update_layout(xaxis=dict(tickmode='linear', tick0=0, dtick=2), height=350)
+    return fig
 
-else:
-    incidents['hour'] = 0
-    incidents['day_of_week'] = 'Unknown'
-    incidents['month'] = 'Unknown'
-    incidents['season'] = 'Unknown'
+def plot_attacks_by_day(df):
+    if 'день_недели' not in df.columns or df.empty:
+        return None
+    days_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+    daily = df.groupby('день_недели').size().reset_index(name='count')
+    daily['День'] = daily['день_недели'].map(lambda x: days_ru[x])
+    
+    fig = px.bar(daily, x='День', y='count',
+                 title='Распределение атак по дням недели',
+                 color='count', color_continuous_scale='Purples')
+    fig.update_layout(height=350)
+    return fig
 
-with st.sidebar:
-    st.header("Фильтры")
-    df = incidents.copy()
-    if 'Тип предприятия' in df.columns:
-        types = st.multiselect("Тип предприятия", sorted(df['Тип предприятия'].dropna().unique()))
-        if types: df = df[df['Тип предприятия'].isin(types)]
-    if 'Регион размещения предприятия' in df.columns:
-        regions = st.multiselect("Регион", sorted(df['Регион размещения предприятия'].dropna().unique()))
-        if regions: df = df[df['Регион размещения предприятия'].isin(regions)]
+def plot_attacks_by_season(df):
+    if 'сезон' not in df.columns or df.empty:
+        return None
+    seasonal = df.groupby('сезон').size().reset_index(name='count')
+    season_order = ['Зима', 'Весна', 'Лето', 'Осень']
+    seasonal = seasonal[seasonal['сезон'].isin(season_order)]
+    
+    fig = px.pie(seasonal, values='count', names='сезон',
+                 title='Распределение атак по сезонам',
+                 color='сезон', color_discrete_sequence=px.colors.sequential.RdBu)
+    fig.update_layout(height=350)
+    return fig
 
-tab1, tab2, tab3 = st.tabs(["Обзор", "Анализ инцидентов", "Паттерны по времени"])
-
-with tab1:
+def plot_heatmap_hour_day(df):
+    if 'час' not in df.columns or 'день_недели' not in df.columns or df.empty:
+        return None
+    
+    days_ru = ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Вс']
+    pivot = df.pivot_table(index='день_недели', columns='час', aggfunc='size', fill_value=0)
+    pivot.index = pivot.index.map(lambda x: days_ru[x] if x in range(7) else x)
+    
+    fig, ax = plt.subplots(figsize=(14, 6))
+    sns.heatmap(pivot, cmap='YlOrRd', annot=False, ax=ax, cbar_kws={'label': 'Количество'})
+    ax.set_title('Частота инцидентов: День недели × Час суток')
+    ax.set_xlabel('Час суток')
+    ax.set_ylabel('День недели')
+    plt.tight_layout()
+    return fig
+def main():
+    st.set_page_config(
+        page_title="Аналитическая платформа ИБ",
+        layout="wide",
+        initial_sidebar_state="expanded"
+    )
+    
+    st.markdown("### Аналитическая платформа для отслеживания угроз информационной безопасности")
+    
+    incidents_df = load_incidents_from_db()
+    threats_df = load_threats_from_db()
+    
+    with st.sidebar:
+        st.header("Фильтры")
+        
+        df_filtered = incidents_df.copy()
+        
+        if not df_filtered.empty and 'Тип_предприятия' in df_filtered.columns:
+            types = st.multiselect(
+                "Тип предприятия",
+                sorted(df_filtered['Тип_предприятия'].dropna().unique()),
+                default=[]
+            )
+            if types:
+                df_filtered = df_filtered[df_filtered['Тип_предприятия'].isin(types)]
+        
+        if not df_filtered.empty and 'Регион_размещения_предприятия' in df_filtered.columns:
+            regions = st.multiselect(
+                "Регион",
+                sorted(df_filtered['Регион_размещения_предприятия'].dropna().unique()),
+                default=[]
+            )
+            if regions:
+                df_filtered = df_filtered[df_filtered['Регион_размещения_предприятия'].isin(regions)]
+        
+        if not df_filtered.empty and 'Успех' in df_filtered.columns:
+            success_filter = st.radio(
+                "Фильтр по успешности",
+                ["Все", "Только успешные", "Только неудачные"],
+                index=0
+            )
+            if success_filter == "Только успешные":
+                df_filtered = df_filtered[df_filtered['Успех'] == 1]
+            elif success_filter == "Только неудачные":
+                df_filtered = df_filtered[df_filtered['Успех'] == 0]
+    
     if "fake_alert_text" not in st.session_state:
         st.session_state.fake_alert_text = None
         
-    attack_info = get_latest_attack_info(df)
+    attack_info = get_latest_attack_info(df_filtered)
     
     if st.session_state.fake_alert_text:
         attack_info = {"attack": True, "text": st.session_state.fake_alert_text}
-        st.session_state.alert_active_until = pd.Timestamp.now() + pd.Timedelta(minutes=5)
+        st.session_state.alert_active_until = datetime.now() + timedelta(minutes=5)
         st.session_state.alert_text_cache = st.session_state.fake_alert_text
         st.session_state.fake_alert_text = None
 
-    # Генерация голосового оповещения
     audio_b64 = None
-    if attack_info.get("attack"):
-        with st.spinner("Генерация голосового оповещения..."):
-            audio_b64 = generate_tts_audio(attack_info["text"], speaker="kseniya")   # можно поменять на kseniya, baya, aidar
+    if attack_info.get("attack") and tts_model:
+        audio_b64 = generate_tts_audio(attack_info["text"], speaker="kseniya")
 
     attack_json = json.dumps(attack_info, ensure_ascii=False)
 
@@ -223,11 +379,11 @@ with tab1:
 <head>
 <meta charset="utf-8">
 <style>
-body {{ margin:0; background: #0b0f1a; color: white; font-family: system-ui, sans-serif; overflow: hidden; }}
-#waveContainer {{ position: relative; width: 100%; height: 200px; display: flex; align-items: center; justify-content: center; }}
+body {{ margin:0; background: linear-gradient(135deg, #0b0f1a 0%, #1a1f3a 100%); color: white; font-family: system-ui, sans-serif; overflow: hidden; }}
+#waveContainer {{ position: relative; width: 100%; height: 180px; display: flex; align-items: center; justify-content: center; }}
 canvas {{ width: 100%; height: 100%; display: block; }}
-#text {{ position: absolute; bottom: 15px; left: 0; right: 0; text-align: center; font-size: 16px; color: #e5e7eb; text-shadow: 0 0 15px rgba(0,0,0,0.95); pointer-events: none; }}
-#text.active {{ color: #00f5ff; font-weight: 600; }}
+#text {{ position: absolute; bottom: 12px; left: 0; right: 0; text-align: center; font-size: 15px; color: #e5e7eb; text-shadow: 0 0 15px rgba(0,0,0,0.95); pointer-events: none; padding: 0 20px; }}
+#text.active {{ color: #00f5ff; font-weight: 600; text-shadow: 0 0 20px rgba(0,245,255,0.8); }}
 </style>
 </head>
 <body>
@@ -243,8 +399,8 @@ const ctx = canvas.getContext('2d');
 
 let width, height, phase = 0;
 let isSpeaking = false;
-let currentAmp = 7;
-let targetAmp = 7;
+let currentAmp = 6;
+let targetAmp = 6;
 
 const attackData = {attack_json};
 const audioB64 = "{audio_b64 or ''}";
@@ -268,34 +424,23 @@ function triggerAlert(text) {{
   if (audioB64) {{
     const audio = document.getElementById("alertAudio");
     audio.src = "data:audio/wav;base64," + audioB64;
-
-    audio.onplay = () => {{
-      isSpeaking = true;
-      targetAmp = 38;
-    }};
-
-    audio.onended = () => {{
-      isSpeaking = false;
-      targetAmp = 7;
-    }};
-
+    audio.onplay = () => {{ isSpeaking = true; targetAmp = 35; }};
+    audio.onended = () => {{ isSpeaking = false; targetAmp = 6; }};
     audio.play().catch(() => {{}});
   }}
 }}
 
 function draw() {{
   ctx.clearRect(0, 0, width, height);
-
-  currentAmp += (targetAmp - currentAmp) * 0.05;
+  currentAmp += (targetAmp - currentAmp) * 0.06;
   const amp = currentAmp;
-
-  const w = width, h = height, points = 220;
+  const w = width, h = height, points = 200;
   const step = w / points;
   const centerY = h / 2;
 
-  const freq = isSpeaking ? 0.065 : 0.016;
-  const speed = isSpeaking ? 0.32 : 0.045;
-  const glow = isSpeaking ? 32 : 9;
+  const freq = isSpeaking ? 0.07 : 0.018;
+  const speed = isSpeaking ? 0.35 : 0.05;
+  const glow = isSpeaking ? 35 : 10;
 
   ctx.beginPath();
   for (let i = 0; i <= points; i++) {{
@@ -311,10 +456,10 @@ function draw() {{
   ctx.shadowBlur = 0;
 
   ctx.beginPath();
-  ctx.globalAlpha = 0.5;
+  ctx.globalAlpha = 0.6;
   for (let i = 0; i <= points; i++) {{
     const x = i * step;
-    const y = centerY + (amp * 0.7) * Math.sin(i * freq * 1.4 + phase * 1.4);
+    const y = centerY + (amp * 0.8) * Math.sin(i * freq * 1.3 + phase * 1.3);
     i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
   }}
   ctx.strokeStyle = '#ff2f92';
@@ -327,226 +472,110 @@ function draw() {{
 }}
 
 draw();
-
-if (attackData && attackData.attack) {{
-  triggerAlert(attackData.text);
-}}
+if (attackData && attackData.attack) {{ triggerAlert(attackData.text); }}
 </script>
 </body>
 </html>
-""", height=230)
+    """, height=200)
 
-    col1, col2, col3, col4 = st.columns(4)
-    col1.metric("Всего инцидентов", f"{len(df):,}")
-    col2.metric("Угроз из ФСТЭК", len(threats))
-    col3.metric("Типов предприятий", df['Тип предприятия'].nunique() if 'Тип предприятия' in df.columns else 0)
-    col4.metric("Регионов", df['Регион размещения предприятия'].nunique() if 'Регион размещения предприятия' in df.columns else 0)
+    tab1, tab2, tab3 = st.tabs(["Обзор", "Анализ инцидентов", "Временные паттерны"])
 
-    st.subheader("Демонстрация оповещения")
-    fake_type = st.text_input("Введите тип угрозы для оповещения", "")
-    if st.button("Отправить оповещение", type="primary"):
-        if fake_type.strip():
-            fake_text = f"Прогнозируется атака! Тип угрозы: {fake_type}, Регион: Симулированный"
-            st.session_state.fake_alert_text = fake_text
-            st.rerun()
-        else:
-            st.warning("Введите тип угрозы")
-
-    # ====================== ЖИВАЯ ПАНЕЛЬ ВНИЗУ ======================
-    if "live_incidents" not in st.session_state:
-        st.session_state.live_incidents = incidents.copy()
-    if "live_threats" not in st.session_state:
-        st.session_state.live_threats = threats.copy()
-    if "bottom_active_tab" not in st.session_state:
-        st.session_state.bottom_active_tab = -1
-
-    def add_random_rows(df, template_df, max_rows=2):
-        if template_df.empty:
-            return df
-
-        n_add = random.randint(0, max_rows)
-        if n_add == 0:
-            return df
-
-        new_rows = []
-        cols = template_df.columns
-
-        for _ in range(n_add):
-            row = {}
-
-            for c in cols:
-                if c == 'Дата инцидента':
-                    row[c] = pd.Timestamp.now()
-
-                elif template_df[c].dtype in ['object', 'category', 'string']:
-                    vals = template_df[c].dropna().unique().tolist()
-                    row[c] = random.choice(vals) if vals else "Неизвестно"
-
-                elif pd.api.types.is_numeric_dtype(template_df[c]):
-                    vals = template_df[c].dropna().to_numpy()
-                    row[c] = float(random.choice(vals)) if len(vals) > 0 else 0.0
-
-                else:
-                    row[c] = None
-
-            new_rows.append(row)
-
-        return pd.concat([df, pd.DataFrame(new_rows)], ignore_index=True)
-
-    if random.random() < 0.45:
-        st.session_state.live_incidents = add_random_rows(st.session_state.live_incidents, incidents, 1)
-        st.session_state.live_incidents = add_time_features(st.session_state.live_incidents)
-        st.session_state.live_incidents.rename(columns=rename_map, inplace=True)
-    if not threats.empty and random.random() < 0.35:
-        st.session_state.live_threats = add_random_rows(st.session_state.live_threats, threats, 1)
-
-    rename_map = {
-    "hour": "Час",
-    "day_of_week": "День недели",
-    "month": "Месяц",
-    "season": "Сезон"
-    }
-
-    payload = {
-        "incidents": st.session_state.live_incidents.to_dict(orient='records'),
-        "threats": st.session_state.live_threats.to_dict(orient='records'),
-        "active_tab": st.session_state.bottom_active_tab
-    }
-    payload_str = json.dumps(payload, default=str, ensure_ascii=False)
-
-    components.html(f"""
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-  body {{ margin: 0; font-family: system-ui, sans-serif; background: transparent; }}
-  .tabs-wrapper {{ display: flex; background: #0b0f1a; border-top: 2px solid #374151; }}
-  .tab-btn {{ flex: 1; padding: 14px; background: #111827; color: #9ca3af; border: none; border-top: 2px solid #374151; cursor: pointer; font-size: 14px; font-weight: 500; transition: all 0.2s; }}
-  .tab-btn:hover {{ background: #1f2937; color: #e5e7eb; }}
-  .tab-btn.active {{ background: #0f172a; color: #38bdf8; border-top-color: #38bdf8; }}
-
-  /* ПАНЕЛЬ ВСЕГДА ВИДНА */
-  .slide-panel {{ 
-    display: block;
-    background: #0b0f1a;
-    border-top: 1px solid #374151;
-    max-height: 340px;
-    overflow: hidden;
-  }}
-
-  .panel-header {{ display: flex; justify-content: space-between; align-items: center; padding: 10px 16px; background: #111827; color: #f3f4f6; border-bottom: 1px solid #1f2937; flex-shrink: 0; }}
-
-  .table-container {{ max-height: 280px; overflow: auto; padding: 0; }}
-  table {{ width: 100%; border-collapse: collapse; color: #d1d5db; font-size: 12px; }}
-  th, td {{ padding: 9px 12px; border-bottom: 1px solid #1f2937; text-align: left; white-space: nowrap; }}
-  th {{ background: #0f172a; color: #38bdf8; position: sticky; top: 0; font-weight: 600; z-index: 1; }}
-  tr:hover {{ background: #1e293b; }}
-  .empty-msg {{ padding: 40px; text-align: center; color: #6b7280; }}
-</style>
-</head>
-<body>
-
-<div class="tabs-wrapper">
-  <button class="tab-btn active" id="t0" onclick="setTab(0)">Инциденты (Live)</button>
-  <button class="tab-btn" id="t1" onclick="setTab(1)">Угрозы (Live)</button>
-</div>
-
-<div class="slide-panel" id="panel">
-  <div class="panel-header">
-    <span id="pTitle">Таблица инцидентов</span>
-  </div>
-  <div class="table-container" id="tCont">
-    <table id="tData"></table>
-  </div>
-</div>
-
-<script>
-(function() {{
-  const DATA = {payload_str};
-
-  function setTab(idx) {{
-    const t0 = document.getElementById('t0');
-    const t1 = document.getElementById('t1');
-
-    t0.classList.toggle('active', idx === 0);
-    t1.classList.toggle('active', idx === 1);
-
-    document.getElementById('pTitle').innerText =
-      idx === 0 ? 'Таблица инцидентов' : 'Таблица угроз ФСТЭК';
-
-    render(idx === 0 ? DATA.incidents : DATA.threats);
-  }}
-
-  function render(data) {{
-  const table = document.getElementById('tData');
-
-  if (!data || data.length === 0) {{
-    table.innerHTML = '<div class="empty-msg">Нет данных</div>';
-    return;
-  }}
-
-  const headers = Object.keys(data[0]);
-
-  // ДОБАВЛЯЕМ НУМЕРАЦИЮ
-  let html = '<thead><tr><th>№</th>' +
-    headers.map(h => `<th>${{h}}</th>`).join('') +
-    '</tr></thead>';
-
-  html += '<tbody>' + data.map((row, idx) =>
-    '<tr><td>' + (idx + 1) + '</td>' +
-    headers.map(h =>
-      `<td>${{row[h] !== null && row[h] !== undefined ? row[h] : ''}}</td>`
-    ).join('') +
-    '</tr>'
-  ).join('') + '</tbody>';
-
-  table.innerHTML = html;
-
-  const container = document.getElementById('tCont');
-  container.scrollTop = container.scrollHeight;
-}}
-
-  // СРАЗУ ОТКРЫТА ПЕРВАЯ ВКЛАДКА
-  setTab(0);
-
-  window.setTab = setTab;
-}})();
-</script>
-
-</body>
-</html>
-""", height=400)
-
-st.markdown("<div style='height: 80px;'></div>", unsafe_allow_html=True)
-
-with tab2:
-    st.subheader("Распределение инцидентов по типам предприятий")
-    if 'Тип предприятия' in df.columns:
-        type_counts = df['Тип предприятия'].value_counts().head(10).reset_index()
-        type_counts.columns = ['Тип предприятия', 'Количество']
-        fig = px.bar(type_counts, x='Тип предприятия', y='Количество', title="Топ-10 типов предприятий по количеству инцидентов")
-        st.plotly_chart(fig, width="stretch")
-
-with tab3:
-    st.subheader("Паттерны атак по времени суток, дню недели и сезону")
-    if 'hour' in df.columns and len(df) > 0:
-        col_a, col_b = st.columns(2)
-        with col_a:
-            pivot = df.pivot_table(index='day_of_week', columns='hour', aggfunc='size', fill_value=0)
-            fig, ax = plt.subplots(figsize=(12, 7))
-            sns.heatmap(pivot, cmap="Reds", annot=False, ax=ax)
-            plt.title("Частота инцидентов: День недели × Час суток")
-            plt.xlabel("Час суток")
-            plt.ylabel("День недели")
-            st.pyplot(fig)
-        with col_b:
-            hourly = df.groupby('hour').size().reset_index(name='count')
-            fig2 = px.bar(hourly, x='hour', y='count', title="Количество инцидентов по часам суток")
-            st.plotly_chart(fig2, width="stretch")
+    with tab1:
+        st.subheader("Сводная статистика")
         
-        seasonal = df.groupby('season').size().reset_index(name='count')
-        fig3 = px.bar(seasonal, x='season', y='count', title="Распределение инцидентов по сезонам")
-        st.plotly_chart(fig3, width="stretch")
-    else:
-        st.warning("Не удалось извлечь временные данные.")
+        if df_filtered.empty:
+            st.warning("Нет данных для отображения. Проверьте подключение к базе данных.")
+        else:
+            col1, col2, col3, col4 = st.columns(4)
+            with col1:
+                st.metric("Всего инцидентов", f"{len(df_filtered):,}")
+            with col2:
+                st.metric("Угроз в базе", f"{len(threats_df):,}")
+            with col3:
+                n_types = df_filtered['Тип_предприятия'].nunique() if 'Тип_предприятия' in df_filtered.columns else 0
+                st.metric("Типов предприятий", f"{n_types:,}")
+            with col4:
+                n_regions = df_filtered['Регион_размещения_предприятия'].nunique() if 'Регион_размещения_предприятия' in df_filtered.columns else 0
+                st.metric("Регионов", f"{n_regions:,}")
+            
+            st.markdown("---")
+            
+            col5, col6, col7 = st.columns(3)
+            with col5:
+                if 'Успех' in df_filtered.columns:
+                    success_rate = df_filtered['Успех'].mean() * 100
+                    st.metric("Процент успешных атак", f"{success_rate:.1f}%")
+            with col6:
+                if 'Количество_хостов' in df_filtered.columns:
+                    avg_hosts = df_filtered['Количество_хостов'].mean()
+                    st.metric("Среднее количество хостов", f"{avg_hosts:,.0f}")
+            with col7:
+                if 'Код_реализованной_угрозы' in df_filtered.columns:
+                    unique_threats = df_filtered['Код_реализованной_угрозы'].nunique()
+                    st.metric("Уникальных угроз", f"{unique_threats:,}")
+            
+            st.markdown("---")
+            with st.expander("Тест голосового оповещения"):
+                fake_type = st.text_input("Введите тип угрозы для симуляции", "")
+                if st.button("Отправить тестовое оповещение", type="primary"):
+                    if fake_type.strip():
+                        fake_text = f"Прогнозируется атака! Тип угрозы: {fake_type}, Регион: Тестовый"
+                        st.session_state.fake_alert_text = fake_text
+                        st.rerun()
+                    else:
+                        st.warning("Введите тип угрозы")
+
+    with tab2:
+        st.subheader("Детальный анализ инцидентов")
+        
+        if df_filtered.empty:
+            st.info("Нет данных для анализа")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = plot_industry_distribution(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            with col2:
+                fig = plot_region_distribution(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                fig = plot_success_rate_by_industry(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            with col4:
+                fig = plot_threat_distribution(df_filtered, threats_df)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+
+    with tab3:
+        st.subheader("Временные паттерны атак")
+        
+        if df_filtered.empty:
+            st.info("Нет данных для анализа")
+        else:
+            col1, col2 = st.columns(2)
+            with col1:
+                fig = plot_attacks_by_hour(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            with col2:
+                fig = plot_attacks_by_day(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            
+            col3, col4 = st.columns(2)
+            with col3:
+                fig = plot_attacks_by_season(df_filtered)
+                if fig:
+                    st.plotly_chart(fig, use_container_width=True)
+            with col4:
+                fig = plot_heatmap_hour_day(df_filtered)
+                if fig:
+                    st.pyplot(fig, use_container_width=True)
+
+if __name__ == "__main__":
+    main()
