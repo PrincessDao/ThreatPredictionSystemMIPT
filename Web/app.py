@@ -18,12 +18,60 @@ from datetime import datetime, timedelta
 import warnings
 warnings.filterwarnings('ignore')
 
-sys.path.append('../backend')
+from pathlib import Path
+
+# === НАСТРОЙКА ПУТЕЙ ДЛЯ DJANGO ===
+
+def get_project_root():
+    """
+    Находит корень Django-проекта с вложенной структурой:
+    project_root/
+    └── backend/              ← outer (добавляем в sys.path)
+        ├── backend/         ← inner (Python-пакет с settings.py)
+        │   └── settings.py
+        ├── security_app/
+        └── manage.py
+    """
+    current = Path(__file__).resolve()
+    
+    # Ищем папку, внутри которой есть backend/backend/settings.py
+    for parent in [current.parent, current.parent.parent] + list(current.parents):
+        # Проверяем вложенную структуру: outer/backend/inner/settings.py
+        if (parent / 'backend' / 'backend' / 'settings.py').exists():
+            return parent / 'backend'  # Возвращаем outer backend/
+    
+    # Fallback для Docker: проверяем /app/backend/backend/settings.py
+    if Path('/app/backend/backend/settings.py').exists():
+        return Path('/app/backend')
+    
+    # Если не нашли — выводим ошибку с подсказкой
+    raise RuntimeError(
+        "Не найдена вложенная структура backend/backend/settings.py!\n"
+        f"Текущий файл: {current}\n"
+        f"Проверьте структуру:\n"
+        f"  project_root/\n"
+        f"  └── backend/              ← outer (должен быть в sys.path)\n"
+        f"      ├── backend/         ← inner (Python-пакет)\n"
+        f"      │   └── settings.py\n"
+        f"      ├── security_app/\n"
+        f"      └── manage.py"
+    )
+
+# Применяем настройку
+PROJECT_ROOT = get_project_root()
+sys.path.insert(0, str(PROJECT_ROOT))  # Добавляем outer backend/
+
+print(f"✅ PROJECT_ROOT (outer backend): {PROJECT_ROOT}")
+print(f"✅ settings.py exists: {(PROJECT_ROOT / 'backend' / 'settings.py').exists()}")
+print(f"✅ security_app/models.py exists: {(PROJECT_ROOT / 'security_app' / 'models.py').exists()}")
+
 os.environ.setdefault('DJANGO_SETTINGS_MODULE', 'backend.settings')
 
 import django
 django.setup()
-
+print("✅ Django успешно инициализирован")
+# === КОНЕЦ НАСТРОЙКИ ===
+    
 from security_app.models import Incident, Threat
 
 @st.cache_resource

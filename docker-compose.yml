@@ -6,15 +6,16 @@ services:
     container_name: postgres_db
     environment:
       DB_HOST: postgres
-      DB_NAME: threatdb
-      DB_USER: admin
-      DB_PASSWORD: admin
+      POSTGRES_DB: threatdb
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      POSTGRES_HOST_AUTH_METHOD: trust
     ports:
       - "5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U admin -d threatdb"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d threatdb"]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -70,16 +71,28 @@ services:
     volumes:
       - ./backend:/app
       - ./data:/data
+      - /tmp:/tmp
     environment:
-      DATABASE_URL: postgresql://admin:admin@postgres:5432/threatdb
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/threatdb
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      DJANGO_SUPERUSER_USERNAME: admin
+      DJANGO_SUPERUSER_PASSWORD: admin
+      DJANGO_SUPERUSER_EMAIL: admin@test.com
     command: >
       bash -c "
         echo 'Running migrations...' &&
         python manage.py makemigrations security_app &&
         python manage.py migrate &&
+
         echo 'Loading data...' &&
         python manage.py load_data --threats ../data/thrlist.xlsx --incidents ../data/incidents_2000.xlsx &&
+
+        echo 'DATA READY' &&
+        touch /tmp/data_ready &&
+
+        echo 'Creating superuser...' &&
+        python manage.py createsuperuser --noinput || true &&
+
         echo 'Starting Django server...' &&
         python manage.py runserver 0.0.0.0:8000
       "
@@ -97,10 +110,19 @@ services:
       - ./analysis:/app
       - ./artifacts:/artifacts
       - ./data:/data
+      - /tmp:/tmp
     environment:
       KAFKA_BOOTSTRAP_SERVERS: kafka:29092
-      DATABASE_URL: postgresql://admin:admin@postgres:5432/threatdb
-    command: python src/main.py
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/threatdb
+    command: >
+      bash -c "
+        echo 'Waiting for data from backend...' &&
+        while [ ! -f /tmp/data_ready ]; do
+          sleep 2;
+        done &&
+        echo 'Data is ready. Starting analysis...' &&
+        python src/main.py
+      "
 
   streamlit:
     build: ./web
@@ -111,8 +133,12 @@ services:
       - backend
     volumes:
       - ./web:/app
+      - ./backend:/app/backend
+    working_dir: /app
     environment:
       BACKEND_URL: http://backend:8000
+      PROJECT_ROOT: /app/backend
+      DJANGO_SETTINGS_MODULE: backend.settings
     command: streamlit run app.py --server.address 0.0.0.0
 
 volumes:

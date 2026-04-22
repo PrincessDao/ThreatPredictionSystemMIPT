@@ -2,6 +2,7 @@
 from django.core.management.base import BaseCommand
 import pandas as pd
 from security_app.models import Threat, Incident
+from django.utils import timezone
 
 class Command(BaseCommand):
     help = 'Загрузка данных из Excel-файлов ФСТЭК и инцидентов'
@@ -41,6 +42,7 @@ class Command(BaseCommand):
             incident_date = pd.to_datetime(row['Дата инцидента'], dayfirst=True).date()
             
             incident_time = pd.to_datetime(row['Региональное время'], dayfirst=True)
+            incident_time = timezone.make_aware(incident_time.to_pydatetime())
             
             success_value = int(row['Успех']) if pd.notna(row['Успех']) else 0
             success = bool(success_value)

@@ -61,3 +61,8 @@ soundfile==0.12.1
 torch==2.7.0
 silero==0.5.5
 joblib>=1.3.0
+django
+python-dotenv
+djangorestframework
+django-extensions
+psycopg2-binary

@@ -13,3 +13,4 @@ django
 python-dotenv
 djangorestframework
 django-extensions
+psycopg2-binary
